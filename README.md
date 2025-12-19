@@ -16,7 +16,7 @@
 | **`-V` / `--version`** | Quick version check |
 | **Graceful Ctrl+C** | Clean shutdown with signal handling |
 | **Comma-Safe URLs** | URLs with commas in `-tL` files work correctly |
-| **Flash Progress Bar** | Progress bar writes to stderr, doesn't mix with output |
+| **Update Progress Bar** | Progress bar writes to stderr, doesn't mix with output |
 
 
 
