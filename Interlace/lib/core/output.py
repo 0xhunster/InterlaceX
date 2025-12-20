@@ -28,6 +28,10 @@ class OutputHelper:
             self.silent = False
             self.quiet = False
         self.separator = "====================================================="
+        self._tqdm = None
+    
+    def set_tqdm(self, tqdm_instance):
+        self._tqdm = tqdm_instance
 
     def print_banner(self):
         if self.silent or self.quiet:
@@ -74,7 +78,13 @@ class OutputHelper:
             return
             
         template = '[{time}] {leader} [{target}] {command} {message}'
-        print(template.format(**format_args))
+        output_line = template.format(**format_args)
+        
+        # Use tqdm.write() if tqdm is active to prevent progress bar conflicts
+        if self._tqdm is not None:
+            self._tqdm.write(output_line)
+        else:
+            print(output_line)
 
 class Level(IntEnum):
     """Enumeration for output verbosity levels."""
