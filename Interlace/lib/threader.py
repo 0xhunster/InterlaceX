@@ -160,13 +160,14 @@ class Pool:
                 dynamic_ncols=True,
                 leave=True,
                 mininterval=0.1,
-                file=sys.stderr
+                file=sys.stderr,
+                position=0
             )
+            self.output_helper.set_tqdm(self.tqdm)
         else:
             self.tqdm = None
 
     def run(self):
-        """Execute all tasks using thread pool."""
         workers = [
             Worker(self.queue, self.timeout, self.tqdm, self.output_helper)
             for _ in range(self.max_workers)
