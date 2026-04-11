@@ -2,11 +2,12 @@ import functools
 import itertools
 import os.path
 import sys
-from argparse import ArgumentParser
+from argparse import ArgumentParser, ArgumentTypeError
 from io import TextIOWrapper
 from random import choice
 from Interlace.lib.threader import Task
 from netaddr import IPRange, IPSet, glob_to_iprange
+from netaddr.core import AddrFormatError
 
 class InputHelper(object):
     @staticmethod
@@ -26,9 +27,9 @@ class InputHelper(object):
         try:
             ivalue = int(arg)
             if ivalue <= 0:
-                raise parser.ArgumentTypeError("%s is not a valid positive integer!" % arg)
+                raise ArgumentTypeError("%s is not a valid positive integer!" % arg)
         except ValueError:
-            raise parser.ArgumentValueError("%s is not a a number!" % arg)
+            raise ArgumentTypeError("%s is not a number!" % arg)
 
         return arg
 
@@ -68,7 +69,7 @@ class InputHelper(object):
         sibling = None
         blocker = None
         for command in command_list:
-            command = str(command).strip()
+            command = command.strip() if isinstance(command, str) else str(command).strip()
             if len(command) == 0:
                 continue
             # the start or end of a command block
@@ -210,14 +211,14 @@ class InputHelper(object):
                             end_ip = start_ip.rsplit(".", maxsplit=1)[0] + "." + \
                                 post_dash_segment
                             target_spec = IPRange(start_ip, end_ip)
-                        except Exception:
+                        except (ValueError, IndexError, AddrFormatError):
                             # If IP range parsing fails, treat as string target
                             str_targets.add(target_spec)
                             continue
                     elif "*" in target_spec:
                         try:
                             target_spec = glob_to_iprange(target_spec)
-                        except Exception:
+                        except (AddrFormatError, ValueError):
                             # If glob parsing fails, treat as string target
                             str_targets.add(target_spec)
                             continue
