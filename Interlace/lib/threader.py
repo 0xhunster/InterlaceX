@@ -1,7 +1,6 @@
 import subprocess
 import os
 import queue
-import platform
 import signal
 import sys
 import threading
@@ -29,14 +28,6 @@ def register_signal_handlers():
     """Register signal handlers for graceful shutdown. Call this once at startup."""
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
-
-# Determine shell based on platform
-if platform.system().lower() == 'linux':
-    shell_path = os.getenv("SHELL")
-    # Use /bin/sh as default if SHELL is not set or empty
-    shell = shell_path if shell_path and os.path.exists(shell_path) else "/bin/sh"
-else:
-    shell = None
 
 class Task:
     """Represents a single command task to be executed."""
@@ -93,8 +84,8 @@ class Task:
                 self.task, 
                 shell=True,
                 stdout=subprocess.DEVNULL,
-                encoding="utf-8",
-                executable=shell
+                stderr=subprocess.DEVNULL,
+                encoding="utf-8"
             )
             s.communicate()
             return
@@ -103,16 +94,23 @@ class Task:
                 self.task, 
                 shell=True,
                 stdout=subprocess.PIPE,
-                encoding="utf-8",
-                executable=shell
+                stderr=subprocess.PIPE,
+                encoding="utf-8"
             )
-            out, _ = s.communicate()
+            out, err = s.communicate()
 
         if out != "":
             if t:
                 t.write(out)
             else:
                 print(out, end='')  # Output already has newline from command
+        
+        # Print stderr if there are errors
+        if err and err.strip():
+            if t:
+                t.write(err)
+            else:
+                print(err, end='', file=sys.stderr)
 
 class Worker:
     """Worker that processes tasks from a queue."""
