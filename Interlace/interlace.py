@@ -3,7 +3,7 @@ from sys import argv
 
 from Interlace.lib.core.input import InputParser, InputHelper
 from Interlace.lib.core.output import OutputHelper, Level
-from Interlace.lib.threader import Pool
+from Interlace.lib.threader import Pool, register_signal_handlers, _shutdown_event, _interrupt_message_shown
 
 
 def task_queue_generator_func(arguments, output, repeat):
@@ -25,6 +25,13 @@ def main():
     if '-V' in argv or '--version' in argv:
         print(f'InterlaceX v{__version__}')
         return
+    
+    # Reset shutdown event for this run (fixes Issue 1: global state)
+    _shutdown_event.clear()
+    _interrupt_message_shown.clear()
+    
+    # Register signal handlers at startup (fixes Issue 3: early registration)
+    register_signal_handlers()
     
     parser = InputParser()
     arguments = parser.parse(argv[1:])
