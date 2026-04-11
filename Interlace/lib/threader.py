@@ -13,19 +13,28 @@ from Interlace.lib.core.output import OutputHelper, Level
 
 # Global shutdown flag for graceful termination
 _shutdown_event = threading.Event()
+_interrupt_message_shown = threading.Event()
 
 def _signal_handler(signum, frame):
     """Handle SIGINT/SIGTERM for graceful shutdown."""
-    _shutdown_event.set()
-    print("\n[!] Interrupted. Shutting down gracefully...", file=sys.stderr)
+    # Use atomic operation to ensure the message is printed only once
+    if not _interrupt_message_shown.is_set():
+        _interrupt_message_shown.set()
+        _shutdown_event.set()
+        print("\n[!] Interrupted. Shutting down gracefully...", file=sys.stderr)
+    elif not _shutdown_event.is_set():
+        _shutdown_event.set()
 
-# Register signal handler
-signal.signal(signal.SIGINT, _signal_handler)
-signal.signal(signal.SIGTERM, _signal_handler)
+def register_signal_handlers():
+    """Register signal handlers for graceful shutdown. Call this once at startup."""
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
 
 # Determine shell based on platform
 if platform.system().lower() == 'linux':
-    shell = os.getenv("SHELL") if os.getenv("SHELL") else "/bin/sh"
+    shell_path = os.getenv("SHELL")
+    # Use /bin/sh as default if SHELL is not set or empty
+    shell = shell_path if shell_path and os.path.exists(shell_path) else "/bin/sh"
 else:
     shell = None
 
@@ -182,7 +191,9 @@ class Pool:
                         break
                     _shutdown_event.wait(timeout=0.5)
         except KeyboardInterrupt:
-            _shutdown_event.set()
+            # Signal handler already printed the message, just set the flag
+            if not _shutdown_event.is_set():
+                _shutdown_event.set()
         finally:
             if self.tqdm is not None:
                 self.tqdm.close()
