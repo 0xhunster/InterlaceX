@@ -6,9 +6,8 @@ import signal
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from multiprocessing import Event
+from threading import Event
 from tqdm import tqdm
-
 from Interlace.lib.core.output import OutputHelper, Level
 
 # Global shutdown flag for graceful termination
@@ -17,7 +16,7 @@ _shutdown_event = threading.Event()
 def _signal_handler(signum, frame):
     """Handle SIGINT/SIGTERM for graceful shutdown."""
     _shutdown_event.set()
-    print("\n[!] Interrupted. Shutting down gracefully...", file=sys.stderr)
+    os._exit(1)
 
 # Register signal handler
 signal.signal(signal.SIGINT, _signal_handler)
@@ -31,11 +30,11 @@ else:
 
 class Task:
     """Represents a single command task to be executed."""
-    def __init__(self, command, silent=False):
+    def __init__(self, command, suppress_output=False):
         self.task = command
         self.self_lock = None
         self.sibling_locks = []
-        self.silent = silent
+        self.suppress_output = suppress_output
 
     def __cmp__(self, other):
         return self.name() == other.name()
@@ -45,7 +44,7 @@ class Task:
 
     def clone(self):
         """Create a copy of this task with same configuration."""
-        new_task = Task(self.task, self.silent)
+        new_task = Task(self.task, self.suppress_output)
         new_task.self_lock = self.self_lock
         new_task.sibling_locks = self.sibling_locks
         return new_task
@@ -54,10 +53,10 @@ class Task:
         """Replace a substring in the command."""
         self.task = self.task.replace(old, new)
 
-    def run(self, t=False):
+    def run(self, t=False, timeout=None):
         for lock in self.sibling_locks:
             lock.wait()
-        self._run_task(t)
+        self._run_task(t, timeout)
         if self.self_lock:
             self.self_lock.set()
 
@@ -77,33 +76,42 @@ class Task:
             self.self_lock.clear()
         return self.self_lock
 
-    def _run_task(self, t=False):
+    def _run_task(self, t=False, timeout=None):
         """Internal method to execute the command."""
-        if self.silent:
+        if self.suppress_output:
             s = subprocess.Popen(
-                self.task, 
+                self.task,
                 shell=True,
                 stdout=subprocess.DEVNULL,
-                encoding="utf-8",
+                stderr=subprocess.DEVNULL,
                 executable=shell
             )
-            s.communicate()
+            try:
+                s.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                s.kill()
+                s.communicate()
             return
         else:
             s = subprocess.Popen(
-                self.task, 
+                self.task,
                 shell=True,
                 stdout=subprocess.PIPE,
-                encoding="utf-8",
                 executable=shell
             )
-            out, _ = s.communicate()
+            try:
+                out_bytes, _ = s.communicate(timeout=timeout)
+                out = out_bytes.decode('utf-8', errors='replace') if out_bytes else ""
+            except subprocess.TimeoutExpired:
+                s.kill()
+                s.communicate()
+                return
 
         if out != "":
             if t:
                 t.write(out)
             else:
-                print(out, end='')  # Output already has newline from command
+                print(out, end='')
 
 class Worker:
     """Worker that processes tasks from a queue."""
@@ -127,19 +135,18 @@ class Worker:
 
             try:
                 if self.tqdm is not None:
+                    task.run(self.tqdm, self.timeout)
                     self.tqdm.update(1)
-                    task.run(self.tqdm)
                 else:
-                    task.run()
+                    task.run(timeout=self.timeout)
             except Exception as e:
                 if not _shutdown_event.is_set():
                     self.output_helper.terminal(Level.ERROR, task.name(), f"Task failed: {e}")
 
-
 class Pool:
     """Thread pool for executing tasks concurrently."""
-    
-    def __init__(self, max_workers, task_queue, timeout, output_helper, progress_bar, quiet=False):
+
+    def __init__(self, max_workers, task_queue, timeout, output_helper, hide_bar, quiet=False):
         max_workers = int(max_workers)
         tasks_count = next(task_queue)
         if not tasks_count:
@@ -154,7 +161,7 @@ class Pool:
         self.output_helper = output_helper if output_helper else OutputHelper()
         # Progress bar - hide in silent mode (clean output) or quiet mode (no output)
         silent = getattr(output_helper, 'silent', False) if output_helper else False
-        if not progress_bar and not quiet and not silent:
+        if not hide_bar and not quiet and not silent:
             self.tqdm = tqdm(
                 total=tasks_count,
                 dynamic_ncols=True,
