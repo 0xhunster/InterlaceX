@@ -1,6 +1,7 @@
 import subprocess
 import os
 import queue
+import platform
 import signal
 import sys
 import threading
@@ -12,22 +13,21 @@ from Interlace.lib.core.output import OutputHelper, Level
 
 # Global shutdown flag for graceful termination
 _shutdown_event = threading.Event()
-_interrupt_message_shown = threading.Event()
 
 def _signal_handler(signum, frame):
     """Handle SIGINT/SIGTERM for graceful shutdown."""
-    # Use atomic operation to ensure the message is printed only once
-    if not _interrupt_message_shown.is_set():
-        _interrupt_message_shown.set()
-        _shutdown_event.set()
-        print("\n[!] Interrupted. Shutting down gracefully...", file=sys.stderr)
-    elif not _shutdown_event.is_set():
-        _shutdown_event.set()
+    _shutdown_event.set()
+    print("\n[!] Interrupted. Shutting down gracefully...", file=sys.stderr)
 
-def register_signal_handlers():
-    """Register signal handlers for graceful shutdown. Call this once at startup."""
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
+# Register signal handler
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
+
+# Determine shell based on platform
+if platform.system().lower() == 'linux':
+    shell = os.getenv("SHELL") if os.getenv("SHELL") else "/bin/sh"
+else:
+    shell = None
 
 class Task:
     """Represents a single command task to be executed."""
@@ -84,8 +84,8 @@ class Task:
                 self.task, 
                 shell=True,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                encoding="utf-8"
+                encoding="utf-8",
+                executable=shell
             )
             s.communicate()
             return
@@ -94,23 +94,16 @@ class Task:
                 self.task, 
                 shell=True,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                encoding="utf-8"
+                encoding="utf-8",
+                executable=shell
             )
-            out, err = s.communicate()
+            out, _ = s.communicate()
 
         if out != "":
             if t:
                 t.write(out)
             else:
                 print(out, end='')  # Output already has newline from command
-        
-        # Print stderr if there are errors
-        if err and err.strip():
-            if t:
-                t.write(err)
-            else:
-                print(err, end='', file=sys.stderr)
 
 class Worker:
     """Worker that processes tasks from a queue."""
@@ -189,9 +182,7 @@ class Pool:
                         break
                     _shutdown_event.wait(timeout=0.5)
         except KeyboardInterrupt:
-            # Signal handler already printed the message, just set the flag
-            if not _shutdown_event.is_set():
-                _shutdown_event.set()
+            _shutdown_event.set()
         finally:
             if self.tqdm is not None:
                 self.tqdm.close()
