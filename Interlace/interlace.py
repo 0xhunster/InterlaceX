@@ -5,8 +5,7 @@ from Interlace.lib.core.input import InputParser, InputHelper
 from Interlace.lib.core.output import OutputHelper, Level
 from Interlace.lib.threader import Pool
 
-
-def task_queue_generator_func(arguments, output, repeat):
+def task_queue_generator_func(arguments, repeat):
     tasks_data = InputHelper.process_data_for_tasks_iterator(arguments)
     tasks_count = tasks_data["tasks_count"]
     yield tasks_count
@@ -16,16 +15,15 @@ def task_queue_generator_func(arguments, output, repeat):
         for task in tasks_iterator:
             yield task
 
-
 def main():
     """Main entry point for InterlaceX."""
     from Interlace.lib.core.__version__ import __version__
-    
+
     # Handle version check early, before full arg parsing
     if '-V' in argv or '--version' in argv:
         print(f'InterlaceX v{__version__}')
         return
-    
+
     parser = InputParser()
     arguments = parser.parse(argv[1:])
     output = OutputHelper(arguments)
@@ -34,14 +32,11 @@ def main():
     if not arguments.sober:
         output.print_banner()
 
-    if arguments.repeat:
-        repeat = int(arguments.repeat)
-    else:
-        repeat = 1
+    repeat = arguments.repeat
 
     pool = Pool(
         arguments.threads,
-        task_queue_generator_func(arguments, output, repeat),
+        task_queue_generator_func(arguments, repeat),
         arguments.timeout,
         output,
         arguments.sober,
@@ -49,7 +44,5 @@ def main():
     )
     pool.run()
 
-
 if __name__ == "__main__":
     main()
-
