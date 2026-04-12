@@ -43,7 +43,7 @@ class OutputHelper:
         print("  Fork: Akash Sarkar (@0xhunster)")
         print(self.separator)
 
-    def terminal(self, level, target, command, message=""):
+    def terminal(self, level, task_command, status, message=""):  # FIX BUG 7: renamed 'target' → 'task_command', 'command' → 'status' to match actual usage
         if level == 0 and not self.verbose:
             return
 
@@ -64,8 +64,8 @@ class OutputHelper:
 
         format_args = {
             'time': strftime("%H:%M:%S", localtime()),
-            'target': target,
-            'command': command,
+            'task_command': task_command,  # FIX BUG 7: renamed from 'target'
+            'status': status,  # FIX BUG 7: renamed from 'command'
             'message': message,
             'leader': leader
         }
@@ -77,7 +77,7 @@ class OutputHelper:
         if self.silent and level != Level.ERROR:
             return
             
-        template = '[{time}] {leader} [{target}] {command} {message}'
+        template = '[{time}] {leader} [{task_command}] {status} {message}'  # FIX BUG 7: updated template keys
         output_line = template.format(**format_args)
         
         # Use tqdm.write() if tqdm is active to prevent progress bar conflicts
