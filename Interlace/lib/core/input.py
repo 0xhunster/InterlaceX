@@ -1,3 +1,4 @@
+import argparse
 import functools
 import itertools
 import os.path
@@ -19,18 +20,18 @@ class InputHelper(object):
     @staticmethod
     def readable_file(parser, arg):
         if InputHelper.check_path(parser, arg):
-            return open(arg, 'r')  # return an open file handle
+            with open(arg, 'r') as f:
+                return f.readlines()
 
     @staticmethod
     def check_positive(parser, arg):
         try:
             ivalue = int(arg)
             if ivalue <= 0:
-                raise parser.ArgumentTypeError("%s is not a valid positive integer!" % arg)
+                raise argparse.ArgumentTypeError("%s is not a valid positive integer!" % arg)
         except ValueError:
-            raise parser.ArgumentValueError("%s is not a a number!" % arg)
-
-        return arg
+            parser.error("%s is not a valid number!" % arg)
+        return ivalue
 
     @staticmethod
     def _get_files_from_directory(arg):
@@ -49,8 +50,11 @@ class InputHelper(object):
             return port_type.split(",")
         elif "-" in port_type:
             tmp = port_type.split("-")
-            begin_range = int(tmp[0])
-            end_range = int(tmp[1])
+            try:
+                begin_range = int(tmp[0])
+                end_range = int(tmp[1])
+            except ValueError:
+                raise ValueError(f"Invalid port range: '{port_type}'. Expected format: start-end (e.g. 8080-9090)")
             if begin_range >= end_range:
                 raise Exception("Invalid range provided")
             return list(range(begin_range, end_range + 1))
@@ -78,7 +82,7 @@ class InputHelper(object):
                 new_task_name = ''
                 if command.startswith('_block:'):
                     new_task_name = command.split('_block:')[1][:-1].strip()
-                if task_name and task_name == new_task_name:
+                if task_name is not None and task_name == new_task_name:
                     return task_block
                 # otherwise pre-process all the commands in this new `new_task_name` block
                 tasks = InputHelper._pre_process_commands(command_list, new_task_name, False, silent)
@@ -96,10 +100,8 @@ class InputHelper(object):
                     blocker = sibling
                     continue
                 task = Task(command, silent)
-                # if we're in the global scope and there was a previous _blocker_ encountered, we wait for the last
-                # child of the block
                 if is_global_task and blocker:
-                    task.wait_for(task_block)
+                    task.wait_for([blocker])
                 # all but the first command in a block scope wait for its predecessor
                 elif sibling and not is_global_task:
                     task.wait_for([sibling])
@@ -140,7 +142,7 @@ class InputHelper(object):
                 for dirty_target in itertools.chain(str_targets, ipset_targets):
                     yielded_task = task.clone()
                     dirty_target = str(dirty_target)
-                    yielded_task.replace(CLEANTARGET_VAR,dirty_target.replace(
+                    yielded_task.replace(CLEANTARGET_VAR, dirty_target.replace(
                         "http://", "").replace("https://", "").rstrip("/").replace("/", "-"),
                         )
                     yield yielded_task
@@ -159,12 +161,11 @@ class InputHelper(object):
                 yield task
 
     @staticmethod
-    def _replace_variable_array(
-        tasks_generator_func, variable, replacements_iterator
-    ):
+    def _replace_variable_array(tasks_generator_func, variable, replacements_iterator):
         for task in tasks_generator_func():
-            task.replace(variable, str(next(replacements_iterator)))
-            yield task
+            yielded_task = task.clone()
+            yielded_task.replace(variable, str(next(replacements_iterator)))
+            yield yielded_task
 
     @staticmethod
     def _process_targets(arguments):
@@ -184,11 +185,11 @@ class InputHelper(object):
         else:
             # -tL flag: each line is a single target, no comma splitting
             target_specs_file = arguments.target_list
-            if not isinstance(target_specs_file, TextIOWrapper):
+            if not isinstance(target_specs_file, (TextIOWrapper, list)):
                 if not sys.stdin.isatty():
                     target_specs_file = sys.stdin
             target_specs = (
-                pre_process_target_spec(target_spec.strip(), split_comma=False) 
+                pre_process_target_spec(target_spec.strip(), split_comma=False)
                 for target_spec in target_specs_file if target_spec.strip()
             )
             target_specs = itertools.chain(*target_specs)
@@ -197,6 +198,8 @@ class InputHelper(object):
             str_targets = set()
             ips_list = list()
             for target_spec in target_specs:
+                if not target_spec:
+                    continue
                 if (
                     target_spec.startswith(".") or
                     (target_spec[0].isalpha() or target_spec[-1].isalpha()) or
@@ -281,6 +284,8 @@ class InputHelper(object):
 
         if arguments.random:
             files = InputHelper._get_files_from_directory(arguments.random)
+            if not files:
+                raise Exception(f"No files found in random directory: {arguments.random}")
             random_file = choice(files)
         else:
             random_file = None
@@ -401,16 +406,11 @@ class InputParser(object):
     @staticmethod
     def setup_parser():
         from Interlace.lib.core.__version__ import __version__
-        
-        parser = ArgumentParser()
-        
-        # Version argument
-        parser.add_argument(
-            '-V', '--version', action='version',
-            version=f'Interlace v{__version__}',
-            help='Show version and exit'
-        )
 
+        parser = ArgumentParser()
+
+        # Version argument
+        parser.add_argument('-V', '--version', action='version',version=f'InterlaceX v{__version__}',help='Show version and exit')
         # Check if version flag or stdin is being used - don't require target in these cases
         requireTargetArg = True
         if not sys.stdin.isatty():
@@ -420,133 +420,33 @@ class InputParser(object):
             requireTargetArg = False
 
         targets = parser.add_mutually_exclusive_group(required=requireTargetArg)
-
-        targets.add_argument(
-            '-t', dest='target', required=False,
-            help='Specify a target or domain name either in comma format, '
-                 'CIDR notation, glob notation, or a single target.'
-        )
-
-        targets.add_argument(
-            '-tL', dest='target_list', required=False,
-            help='Specify a list of targets or domain names.',
-            metavar="FILE",
-            type=lambda x: InputHelper.readable_file(parser, x)
-        )
-
+        targets.add_argument('-t', dest='target', required=False,help='Specify a target or domain name either in comma format, CIDR notation, glob notation, or a single target.')
+        targets.add_argument('-tL', dest='target_list', required=False,help='Specify a list of targets or domain names.',metavar="FILE",type=lambda x: InputHelper.readable_file(parser, x))
         # exclusions group
         exclusions = parser.add_mutually_exclusive_group()
-
-        exclusions.add_argument(
-            '-e', dest='exclusions', required=False,
-            help='Specify an exclusion either in comma format, '
-                 'CIDR notation, or a single target.'
-        )
-
-        exclusions.add_argument(
-            '-eL', dest='exclusions_list', required=False,
-            help='Specify a list of exclusions.',
-            metavar="FILE",
-            type=lambda x: InputHelper.readable_file(parser, x)
-        )
-
-        parser.add_argument(
-            '-threads', dest='threads', required=False,
-            help="Specify the maximum number of threads to run (DEFAULT:5)",
-            default=5,
-            type=lambda x: InputHelper.check_positive(parser, x)
-        )
-
-        parser.add_argument(
-            '-timeout', dest='timeout', required=False,
-            help="Command timeout in seconds (DEFAULT:600)",
-            default=600,
-            type=lambda x: InputHelper.check_positive(parser, x)
-        )
-
-        parser.add_argument(
-            '-pL', dest='proxy_list', required=False,
-            help='Specify a list of proxies.',
-            metavar="FILE",
-            type=lambda x: InputHelper.readable_file(parser, x)
-        )
-
+        exclusions.add_argument('-e', dest='exclusions', required=False,help='Specify an exclusion either in comma format, CIDR notation, or a single target.')
+        exclusions.add_argument('-eL', dest='exclusions_list', required=False,help='Specify a list of exclusions.',metavar="FILE",type=lambda x: InputHelper.readable_file(parser, x))
+        parser.add_argument('-threads', dest='threads', required=False, help="Specify the maximum number of threads to run (DEFAULT:5)", default=5, type=lambda x: InputHelper.check_positive(parser, x))
+        parser.add_argument('-timeout', dest='timeout', required=False, help="Command timeout in seconds (DEFAULT:600)", default=600, type=lambda x: InputHelper.check_positive(parser, x))
+        parser.add_argument('-pL', dest='proxy_list', required=False, help='Specify a list of proxies.', metavar="FILE", type=lambda x: InputHelper.readable_file(parser, x))
         # Commands group - not required when checking version
         requireCommandArg = '-V' not in sys.argv and '--version' not in sys.argv
         commands = parser.add_mutually_exclusive_group(required=requireCommandArg)
-        commands.add_argument(
-            '-c', dest='command',
-            help='Specify a single command to execute.'
-        )
-
-        commands.add_argument(
-            '-cL', dest='command_list', required=False,
-            help='Specify a list of commands to execute',
-            metavar="FILE",
-            type=lambda x: InputHelper.readable_file(parser, x)
-        )
-
-        parser.add_argument(
-            '-o', dest='output',
-            help='Specify an output folder variable that can be used in commands as _output_'
-        )
-
-        parser.add_argument(
-            '-p', dest='port',
-            help='Specify a port variable that can be used in commands as _port_'
-        )
-
-        parser.add_argument(
-            '--proto', dest='proto',
-            help='Specify protocols that can be used in commands as _proto_'
-        )
-
-        parser.add_argument(
-            '-rp', dest='realport',
-            help='Specify a real port variable that can be used in commands as _realport_'
-        )
-
-        parser.add_argument(
-            '-random', dest='random',
-            help='Specify a directory of files that can be randomly used in commands as _random_',
-            type=lambda x: InputHelper.check_path(parser, x)
-        )
-
-        parser.add_argument(
-            '--no-cidr', dest='nocidr', action='store_true', default=False,
-            help='If set then CIDR notation in a target file will not be automatically '
-                 'be expanded into individual hosts.'
-        )
-
-        parser.add_argument(
-            '--no-color', '-nc', dest='nocolor', action='store_true', default=False,
-            help='If set then any foreground or background colours will be '
-                 'stripped out.'
-        )
-
-        parser.add_argument(
-            '--no-bar', '-nb', dest='sober', action='store_true', default=False,
-            help='If set then progress bar will be stripped out'
-        )
-
-        parser.add_argument(
-            '--repeat', dest='repeat',
-            help='repeat the given command x number of times.'
-        )
+        commands.add_argument('-c', dest='command', help='Specify a single command to execute.')
+        commands.add_argument('-cL', dest='command_list', required=False, help='Specify a list of commands to execute', metavar="FILE", type=lambda x: InputHelper.readable_file(parser, x))
+        parser.add_argument('-o', dest='output', help='Specify an output folder variable that can be used in commands as _output_')
+        parser.add_argument('-p', dest='port', help='Specify a port variable that can be used in commands as _port_')
+        parser.add_argument('--proto', dest='proto', help='Specify protocols that can be used in commands as _proto_')
+        parser.add_argument('-rp', dest='realport', help='Specify a real port variable that can be used in commands as _realport_')
+        parser.add_argument('-random', dest='random', help='Specify a directory of files that can be randomly used in commands as _random_', type=lambda x: InputHelper.check_path(parser, x))
+        parser.add_argument('--no-cidr', dest='nocidr', action='store_true', default=False, help='If set then CIDR notation in a target file will not be automatically be expanded into individual hosts.')
+        parser.add_argument('--no-color', '-nc', dest='nocolor', action='store_true', default=False, help='If set then any foreground or background colours will be stripped out.')
+        parser.add_argument('--no-bar', '-nb', dest='sober', action='store_true', default=False, help='If set then progress bar will be stripped out')
+        parser.add_argument('--repeat', dest='repeat',help='repeat the given command x number of times.',type=lambda x: InputHelper.check_positive(parser, x),default=1)
 
         output_types = parser.add_mutually_exclusive_group()
-        output_types.add_argument(
-            '-v', '--verbose', dest='verbose', action='store_true', default=False,
-            help='If set then verbose output will be displayed in the terminal.'
-        )
-        output_types.add_argument(
-            '--silent', '-s', dest='silent', action='store_true', default=False,
-            help='If set then only command output will be displayed. '
-                 'Banners and thread info will be hidden.'
-        )
-        output_types.add_argument(
-            '--quiet', '-q', dest='quiet', action='store_true', default=False,
-            help='If set then all output including command output will be suppressed.'
-        )
+        output_types.add_argument('-v', '--verbose', dest='verbose', action='store_true', default=False,help='If set then verbose output will be displayed in the terminal.')
+        output_types.add_argument('--silent', '-s', dest='silent', action='store_true', default=False,help='If set then only command output will be displayed. Banners and thread info will be hidden.')
+        output_types.add_argument('--quiet', '-q', dest='quiet', action='store_true', default=False,help='If set then all output including command output will be suppressed.')
 
         return parser
