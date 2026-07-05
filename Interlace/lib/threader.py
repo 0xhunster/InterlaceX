@@ -28,6 +28,93 @@ if platform.system().lower() == 'linux':
 else:
     shell = None
 
+class CloneGroup:
+    """
+    Synchronization primitive shared by a template task and every clone
+    produced from it via Task.clone() (once per target/port/proto/etc).
+
+    Clones are tracked in a trie keyed by the actual (variable, value)
+    substitution applied at each fan-out stage -- e.g. ("target", "a.com"),
+    then ("_port_", "8080") for cascading fan-out -- so a dependent task can
+    resolve the *specific* clone of its prerequisite that matches its own
+    fan-out key (see Task.clone()/Task.run() for how keys are tracked, and
+    find_deepest() below for how a dependent resolves them), giving
+    independent per-target/per-port barriers instead of one global one.
+
+    Each node's `pending` count reflects how many leaf completions are
+    still outstanding *underneath it*, aggregated recursively through
+    children via set()'s upward propagation -- not just its own direct
+    completion. A node with no children behaves exactly like a flat
+    counter: pending starts at 1 (for the un-cloned task) and set() fires
+    its event once that single completion happens.
+    """
+    def __init__(self, parent=None):
+        self._struct_lock = threading.Lock()
+        self._pending = 1
+        self._event = Event()
+        self._children = {}
+        self._parent = parent
+
+    def add_clone(self, key_component, is_first_clone_of_self):
+        """Register a newly created clone under a specific fan-out key.
+
+        Returns the child CloneGroup the new clone should use as its own
+        self_lock. `is_first_clone_of_self` retires this node's own
+        reserved slot the first time it is cloned (superseded by its
+        children); a new, never-seen key_component adds one outstanding
+        slot to `self`. Reusing an existing key_component (e.g. a
+        duplicate value in a replacements list) instead adds the extra
+        slot directly to that child, so a stray double-registration can't
+        leave an ancestor permanently short one decrement.
+        """
+        with self._struct_lock:
+            if is_first_clone_of_self:
+                self._pending -= 1
+            child = self._children.get(key_component)
+            is_new_child = child is None
+            if is_new_child:
+                child = CloneGroup(parent=self)
+                self._children[key_component] = child
+                self._pending += 1
+        if not is_new_child:
+            with child._struct_lock:
+                child._pending += 1
+        return child
+
+    def find_deepest(self, key_path):
+        """Walk this trie following key_path as far as matching children
+        exist. Stops -- returning the deepest node reached -- as soon as
+        the path runs out or the next component has no matching child,
+        which is exactly right when the dependent's fan-out is narrower
+        or wider than the prerequisite's: the coarsest common node is
+        always the correct thing to wait on.
+        """
+        node = self
+        for component in key_path:
+            with node._struct_lock:
+                child = node._children.get(component)
+            if child is None:
+                break
+            node = child
+        return node
+
+    def set(self):
+        """Called when one clone (or the un-cloned template) finishes
+        running. Fires this node's event only once every clone
+        registered under it has also finished, and propagates the
+        completion up to the parent so ancestor nodes -- and anyone
+        waiting on a coarser key -- resolve correctly too."""
+        with self._struct_lock:
+            self._pending -= 1
+            just_finished = self._pending == 0
+        if just_finished:
+            self._event.set()
+            if self._parent is not None:
+                self._parent.set()
+
+    def wait(self):
+        self._event.wait()
+
 class Task:
     """Represents a single command task to be executed."""
     def __init__(self, command, suppress_output=False):
@@ -35,6 +122,11 @@ class Task:
         self.self_lock = None
         self.sibling_locks = []
         self.suppress_output = suppress_output
+        self._cloned = False
+        # Ordered tuple of (variable, value) substitutions applied so far,
+        # e.g. (("target", "a.com"), ("_port_", "8080")) -- used to resolve
+        # which specific clone of a prerequisite this task depends on.
+        self.fanout_key = ()
 
     def __cmp__(self, other):
         return self.name() == other.name()
@@ -42,11 +134,26 @@ class Task:
     def __hash__(self):
         return self.task.__hash__()
 
-    def clone(self):
-        """Create a copy of this task with same configuration."""
+    def clone(self, fanout_key_update=None):
+        """Create a copy of this task with same configuration.
+
+        `fanout_key_update` is the (variable, value) pair being applied by
+        this clone (e.g. ("target", "a.com")), if any -- it extends the
+        clone's fanout_key and, if something depends on this task, routes
+        the clone into the matching child of this task's CloneGroup.
+        """
         new_task = Task(self.task, self.suppress_output)
-        new_task.self_lock = self.self_lock
-        new_task.sibling_locks = self.sibling_locks
+        new_task.sibling_locks = list(self.sibling_locks)
+        if fanout_key_update is not None:
+            new_task.fanout_key = self.fanout_key + (fanout_key_update,)
+        else:
+            new_task.fanout_key = self.fanout_key
+        if self.self_lock is not None:
+            new_task.self_lock = self.self_lock.add_clone(
+                key_component=fanout_key_update,
+                is_first_clone_of_self=not self._cloned,
+            )
+            self._cloned = True
         return new_task
 
     def replace(self, old, new):
@@ -54,11 +161,13 @@ class Task:
         self.task = self.task.replace(old, new)
 
     def run(self, t=False, timeout=None):
-        for lock in self.sibling_locks:
-            lock.wait()
-        self._run_task(t, timeout)
-        if self.self_lock:
-            self.self_lock.set()
+        for root_lock in self.sibling_locks:
+            root_lock.find_deepest(self.fanout_key).wait()
+        try:
+            self._run_task(t, timeout)
+        finally:
+            if self.self_lock:
+                self.self_lock.set()
 
     def wait_for(self, siblings):
         """Add sibling tasks to wait for before execution."""
@@ -70,10 +179,9 @@ class Task:
         return self.task
 
     def get_lock(self):
-        """Get or create this task's lock for synchronization."""
+        """Get or create this task's root CloneGroup for synchronization."""
         if not self.self_lock:
-            self.self_lock = Event()
-            self.self_lock.clear()
+            self.self_lock = CloneGroup()
         return self.self_lock
 
     def _run_task(self, t=False, timeout=None):
@@ -139,6 +247,7 @@ class Worker:
                     self.tqdm.update(1)
                 else:
                     task.run(timeout=self.timeout)
+                self.output_helper.terminal(Level.VERBOSE, task.name(), "Completed")
             except Exception as e:
                 if not _shutdown_event.is_set():
                     self.output_helper.terminal(Level.ERROR, task.name(), f"Task failed: {e}")

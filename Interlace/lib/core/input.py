@@ -88,7 +88,7 @@ class InputHelper(object):
                 tasks = InputHelper._pre_process_commands(command_list, new_task_name, False, silent)
                 if blocker:
                     for task in tasks:
-                        task.wait_for(task_block)
+                        task.wait_for([blocker])
                 task_block += tasks
                 if len(tasks) > 0:
                     sibling = tasks[-1]
@@ -121,8 +121,8 @@ class InputHelper(object):
             command = task.name()
             if TARGET_VAR in command or HOST_VAR in command or SAFE_TARGET in command:
                 for dirty_target in itertools.chain(str_targets, ipset_targets):
-                    yielded_task = task.clone()
                     dirty_target = str(dirty_target)
+                    yielded_task = task.clone(fanout_key_update=("target", dirty_target))
                     yielded_task.replace(TARGET_VAR, dirty_target)
                     yielded_task.replace(HOST_VAR, dirty_target)
                     yielded_task.replace(
@@ -140,8 +140,8 @@ class InputHelper(object):
                     yield yielded_task
             elif CLEANTARGET_VAR in command:
                 for dirty_target in itertools.chain(str_targets, ipset_targets):
-                    yielded_task = task.clone()
                     dirty_target = str(dirty_target)
+                    yielded_task = task.clone(fanout_key_update=("target", dirty_target))
                     yielded_task.replace(CLEANTARGET_VAR, dirty_target.replace(
                         "http://", "").replace("https://", "").rstrip("/").replace("/", "-"),
                         )
@@ -154,8 +154,9 @@ class InputHelper(object):
         for task in tasks_generator_func():
             if variable in task.name():
                 for replacement in replacements:
-                    yielded_task = task.clone()
-                    yielded_task.replace(variable, str(replacement))
+                    replacement = str(replacement)
+                    yielded_task = task.clone(fanout_key_update=(variable, replacement))
+                    yielded_task.replace(variable, replacement)
                     yield yielded_task
             else:
                 yield task
@@ -163,8 +164,9 @@ class InputHelper(object):
     @staticmethod
     def _replace_variable_array(tasks_generator_func, variable, replacements_iterator):
         for task in tasks_generator_func():
-            yielded_task = task.clone()
-            yielded_task.replace(variable, str(next(replacements_iterator)))
+            replacement = str(next(replacements_iterator))
+            yielded_task = task.clone(fanout_key_update=(variable, replacement))
+            yielded_task.replace(variable, replacement)
             yield yielded_task
 
     @staticmethod
@@ -268,6 +270,10 @@ class InputHelper(object):
         if arguments.output and arguments.output[-1] == "/":
             arguments.output = arguments.output[:-1]
 
+        # create output directory if it doesn't exist
+        if arguments.output and not os.path.exists(arguments.output):
+            os.makedirs(arguments.output, exist_ok=True)
+
         ports = InputHelper._process_port(arguments.port) if arguments.port \
             else None
 
@@ -295,7 +301,7 @@ class InputHelper(object):
         if arguments.command:
             tasks.append(Task(arguments.command.rstrip('\n'), quiet))
         else:
-            tasks = InputHelper._pre_process_commands(arguments.command_list, silent=quiet)
+            tasks = InputHelper._pre_process_commands(iter(arguments.command_list), silent=quiet)
 
         if arguments.proto:
             protocols = arguments.proto.split(",")
@@ -311,6 +317,7 @@ class InputHelper(object):
             tasks_count *= len(real_ports)
         if protocols:
             tasks_count *= len(protocols)
+        tasks_count *= arguments.repeat
 
         return {
             "tasks": tasks,
@@ -394,6 +401,31 @@ class InputHelper(object):
             )
 
         return tasks_generator_func
+
+    @staticmethod
+    def clone_template_tasks(tasks):
+        """
+        Build a fresh, independent copy of a parsed template task list.
+
+        Preserves the wait_for()/sibling_locks dependency structure (which
+        task depends on which) but with entirely new CloneGroup roots, so
+        a call produces a dependency graph isolated from the original
+        tasks and from any other copy -- e.g. one call per --repeat round,
+        so rounds don't share CloneGroup state and one round's completion
+        can't satisfy another round's dependents.
+        """
+        lock_owner = {
+            id(task.self_lock): task for task in tasks if task.self_lock is not None
+        }
+        fresh_tasks = {id(task): Task(task.task, task.suppress_output) for task in tasks}
+
+        for task in tasks:
+            fresh_task = fresh_tasks[id(task)]
+            for root_lock in task.sibling_locks:
+                owner = lock_owner[id(root_lock)]
+                fresh_task.wait_for([fresh_tasks[id(owner)]])
+
+        return [fresh_tasks[id(task)] for task in tasks]
 
 
 class InputParser(object):
